@@ -1,0 +1,209 @@
+---
+title: "Predicting Exercise Form With ML"
+author: "Cin"
+date: "23 October 2015"
+output: html_document
+---
+
+# Overview
+## Backgound
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. 
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. The data used will be from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Data set). 
+
+## Goal
+
+The goal of this project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. The report will describe how the model was built, how cross validation was used, the expected out of sample error and why the relevant choices were made. 
+
+# Data
+## Source
+
+```{r, message=FALSE,warning=FALSE,echo=FALSE}
+require(dplyr)
+require(caret)
+require(pander)
+require(ggplot2)
+
+setwd('H:\\Courses\\DataScience\\PracticalMachineLearning\\Assignment')
+```
+
+The training data for this project is available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). The test data is available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv). 
+
+The data for this project comes from [this source](http://groupware.les.inf.puc-rio.br/har).
+
+The data has been downloaded to a local directory and sourced
+
+```{r}
+
+data2 <- read.csv('pml-testing.csv',stringsAsFactors = FALSE)
+data <- read.csv('pml-training.csv',stringsAsFactors = FALSE)
+```
+
+
+## Preparation
+### Remove Invalid/Unused Features
+
+First, consider the test data set. As a start, only consider features (or column names) that have data available (no **N/A** values). Then remove all columns that do not relate to sensor output.
+
+```{r}
+data2 <- data2[,which(!is.na(data2[1,])&!data2[1,]=='')]
+data2 <- dplyr::select(data2,-c(X,user_name,raw_timestamp_part_1,raw_timestamp_part_2,
+                              cvtd_timestamp,new_window,num_window,problem_id))
+
+data <- select(data,c(which(names(data) %in% names(data2)),which(names(data)=='classe')))
+data <- dplyr::mutate(data,classe = factor(classe))
+```
+
+### Splitting into Training, Validation and Testing Sets
+
+A **60%, 20%, 20%** split (from the training data set) will be used for model training, validation and testing sets
+
+```{r}
+set.seed(12345)
+inTrainValidateTest <- createDataPartition(data$classe,p=0.8, list=FALSE)
+
+# Testing set
+testing <- data[-inTrainValidateTest,]
+
+# Train validation sets
+trainingValidation <- data[inTrainValidateTest,]
+
+# 1-0.2/0.8 to create 60% training, 20% val, 20% test
+inTrain <- createDataPartition(trainingValidation$classe,p=1-0.2/0.8, list=FALSE) 
+
+training <- trainingValidation[inTrain,]
+validation <- trainingValidation[-inTrain,]
+
+```
+
+### Remove Correlated Features
+Now consider features that are highly correlated. "High correlation" will be defined as having correlation greater than **0.9**.
+
+```{r}
+trainCor <- dplyr::select(training,-classe)
+corrs <- cor(trainCor)
+corrs <- corrs - diag(dim(corrs)[1])
+
+corrNmesList <- list()
+cnt <-1
+for (i in 1:(dim(corrs)[1]-1))
+        for(j in (i+1):dim(corrs)[1])
+        {
+                if(abs(corrs[i,j])>0.9) 
+                {
+                        df <- data.frame(x=colnames(corrs)[i],y=colnames(corrs)[j],stringsAsFactors = FALSE)
+                        corrNmesList[[cnt]] <- df
+                        cnt <- cnt+1
+                }
+        }
+
+corrDf <- bind_rows(corrNmesList)
+
+```
+
+The highly correlated set is seen in the table below:
+
+```{r,render=FALSE}
+pander(corrDf)
+```
+
+All the correlated features will be removed from the training, validation and test sets
+
+```{r}
+trainingExCorr <- select(training,-which(names(training) %in% corrDf$y))
+validationExCorr <- select(validation,-which(names(validation) %in% corrDf$y))
+testingExCorr <- select(testing,-which(names(testing) %in% corrDf$y))
+```
+
+# Machine Learning
+
+## Strategy
+
+Several classifier ML algorithms will be trained. Algorithms considered here will be:
+
+* Random Forest
+* Stochastic Gradient Boosting
+* Linear Discriminant Analysis
+* Neural Networks
+
+Please consider the **caret** documentation for more information on each model.
+
+
+The validation set will be used to select the ML algorithm with the highest **Kappa** metric. Finally the selected model will be checked on the testing set.
+
+
+### Model Training
+
+Train all the ML algorithms on the testing set by using the default caret options
+
+```{r, eval=FALSE}
+modRFExCorr <- train(classe~., data=trainingExCorr, method = 'rf',preProcess=c('center','scale'))
+modGBM <- train(classe~., data=trainingExCorr, method = 'gbm',preProcess=c('center','scale'))
+modLDA <- train(classe~., data=trainingExCorr, method = 'lda',preProcess=c('center','scale'))
+modNNET <- train(classe~., data=trainingExCorr, method = 'nnet',preProcess=c('center','scale'))
+```
+
+### Model Selection
+
+```{r, echo=FALSE, warning=FALSE, fig.align='center'}
+modRFExCorr<-readRDS('modRFExCorr.rds')
+modGBM<-readRDS('modGBM.rds')
+modLDA<-readRDS('modLDA.rds')
+modNNET<-readRDS('modNNET.rds')
+```
+
+The **Kappa** metric for each algorithm in the testing and validation sets is shown in the graph below
+
+```{r,message=FALSE, warning=FALSE}
+MODEL <- rep(c('RF','GBM','LDA','NNET'),2)
+SET <- rep(c('TRAINING','VALIDATION'),each=4)
+KAPPA <- rep(0,8)
+
+KAPPA[1] <- confusionMatrix(predict(modRFExCorr,trainingExCorr),trainingExCorr$classe)$overall['Kappa']
+KAPPA[5] <- confusionMatrix(predict(modRFExCorr,validationExCorr),validationExCorr$classe)$overall['Kappa']
+
+KAPPA[2] <- confusionMatrix(predict(modGBM,trainingExCorr),trainingExCorr$classe)$overall['Kappa']
+KAPPA[6] <- confusionMatrix(predict(modGBM,validationExCorr),validation$classe)$overall['Kappa']
+
+KAPPA[3] <- confusionMatrix(predict(modLDA,trainingExCorr),trainingExCorr$classe)$overall['Kappa']
+KAPPA[7] <- confusionMatrix(predict(modLDA,validationExCorr),validation$classe)$overall['Kappa']
+
+KAPPA[4] <- confusionMatrix(predict(modNNET,trainingExCorr),trainingExCorr$classe)$overall['Kappa']
+KAPPA[8] <- confusionMatrix(predict(modNNET,validationExCorr),validation$classe)$overall['Kappa']
+
+modSELECTDF <- data.frame(MODEL=MODEL, SET=SET, KAPPA=KAPPA )
+
+ggplot(aes(x=MODEL, y=KAPPA, colour=SET), data=modSELECTDF) + theme_bw() + 
+geom_point() +ggtitle('Model Training and Validation Performance') + xlab('Model') + ylab('Kappa')
+```
+
+and as a table
+
+```{r}
+pander(modSELECTDF)
+```
+
+As can be seen, the training and validation set performance is reasonably close for each model. 
+
+> The random forest model (RF) has the best performance and will be used to predict the model testing set.
+
+### Selected Model Testing Set Performance
+
+The RF model performance for the validation and testing sets is shown in the table below. Note the testing set here refers to the the testing set created from model training data and **not** the loaded test set that need to be predicted. 
+
+```{r}
+SET <-c('VALIDATION','TESTING')
+PERFORMANCE <- c(KAPPA[5], as.numeric(confusionMatrix(predict(modRFExCorr,testing),testing$classe)$overall['Kappa']))
+
+rfPerfDF <- data.frame(SET=SET, PERFORMANCE=PERFORMANCE)
+pander(rfPerfDF)
+```
+
+
+> The validation and testing set performance correlates very well with a mean kappa performance of ```r sprintf('%.5f',mean(PERFORMANCE))```. 
+
+# Selected Model and Expected Performance
+
+From the results in the previous section the **random forest** model will be used, with an (combined sensitivity and specificity) expected accuracy of **```r sprintf('%.2f %%',mean(PERFORMANCE)*100)```**.
+
